@@ -1,0 +1,12 @@
+[Unit]
+Description=Isekai automation desktop keyring
+Before=gnome-remote-desktop.service isekai-chrome.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/isekai-keyring
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=gnome-session.target

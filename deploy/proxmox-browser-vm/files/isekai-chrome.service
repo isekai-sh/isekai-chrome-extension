@@ -1,0 +1,15 @@
+[Unit]
+Description=Official Google Chrome for Isekai automation
+After=graphical-session.target gnome-session.target
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/isekai-chrome-launch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=gnome-session.target

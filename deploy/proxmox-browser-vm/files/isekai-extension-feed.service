@@ -1,0 +1,18 @@
+[Unit]
+Description=Local update feed for the managed Isekai Chrome extension
+After=network.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+ExecStart=/usr/bin/python3 -m http.server 8765 --bind 127.0.0.1 --directory /opt/isekai/extension-feed
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

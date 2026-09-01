@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+profile_dir="${HOME}/.config/google-chrome-isekai"
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# A GNOME user manager may begin before Mutter has published the display.
+for _attempt in $(seq 1 120); do
+  if [[ -S "${runtime_dir}/wayland-0" ]] || [[ -n "${DISPLAY:-}" ]]; then
+    break
+  fi
+  sleep 1
+done
+
+exec /usr/bin/google-chrome-stable \
+  --user-data-dir="${profile_dir}" \
+  --no-first-run \
+  --no-default-browser-check \
+  --password-store=basic \
+  --start-maximized \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=9222 \
+  about:blank

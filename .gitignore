@@ -4,3 +4,11 @@ dist/
 *.log
 .vscode/
 .idea/
+
+# Never commit per-VM credentials or managed-extension signing artifacts.
+deploy/**/*.pem
+deploy/**/*.key
+deploy/**/*.crx
+deploy/**/*.pub
+deploy/**/.env
+deploy/**/rdp-credentials
