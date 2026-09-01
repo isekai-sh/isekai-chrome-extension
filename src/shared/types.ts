@@ -72,5 +72,6 @@ export type MessageType =
   | { type: 'JOB_SUCCESS'; jobId: string }
   | { type: 'JOB_FAILED'; jobId: string; error: string }
   | { action: 'START_POLLING' }
+  | { action: 'ENSURE_POLLING' }
   | { action: 'STOP_POLLING' }
   | { action: 'GET_STATUS' };

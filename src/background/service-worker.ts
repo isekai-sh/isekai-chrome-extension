@@ -24,6 +24,14 @@ const jobTimeouts = new Map<number, number>();
 // Track local retry attempts for tab closures (job ID → retry count)
 const tabClosureRetries = new Map<string, number>();
 
+// Coalesce startup requests so onStartup and service-worker initialization
+// cannot create duplicate immediate polls.
+let pollingStartPromise: Promise<void> | null = null;
+
+// Chrome can deliver an alarm while an immediate startup poll is still in
+// flight. Only one client may claim a queue item at a time.
+let jobPollPromise: Promise<void> | null = null;
+
 // Maximum local retries for tab closures before reporting to backend
 const MAX_TAB_CLOSURE_RETRIES = 3;
 
@@ -123,38 +131,44 @@ chrome.runtime.onInstalled.addListener(async () => {
 /**
  * Create polling alarm when extension starts
  */
-chrome.runtime.onStartup.addListener(async () => {
+chrome.runtime.onStartup.addListener(() => {
   Logger.info('Extension started');
-
-  // Check if auto-start is enabled
-  const result = await chrome.storage.local.get(STORAGE_KEYS.IS_RUNNING);
-  if (result[STORAGE_KEYS.IS_RUNNING]) {
-    await startPolling();
-  }
+  void resumePollingIfEnabled();
 });
 
 /**
  * Start job polling
  */
 async function startPolling(): Promise<void> {
+  if (pollingStartPromise) {
+    return pollingStartPromise;
+  }
+
+  pollingStartPromise = startPollingInternal();
+
   try {
-    // Test API connection first
-    Logger.info('Testing API connection before starting polling...');
+    await pollingStartPromise;
+  } finally {
+    pollingStartPromise = null;
+  }
+}
 
-    const client = await ApiClient.fromStorage();
-    const health = await client.healthCheck();
-
-    Logger.info('API health check successful', { status: health.status });
-
+async function startPollingInternal(): Promise<void> {
+  try {
     const intervalResult = await chrome.storage.local.get(STORAGE_KEYS.POLLING_INTERVAL);
     const interval = intervalResult[STORAGE_KEYS.POLLING_INTERVAL] || DEFAULT_POLLING_INTERVAL;
+    const existingAlarm = await chrome.alarms.get(ALARM_NAMES.JOB_POLL);
+    if (!existingAlarm || existingAlarm.periodInMinutes !== interval) {
+      // Create the retry mechanism before touching the network. A transient
+      // Core outage during Chrome startup must not disable polling forever.
+      await chrome.alarms.create(ALARM_NAMES.JOB_POLL, {
+        periodInMinutes: interval,
+      });
+      Logger.info(`Polling alarm ensured (interval: ${interval} minute${interval > 1 ? 's' : ''})`);
+    }
 
-    // Create alarm for periodic polling
-    await chrome.alarms.create(ALARM_NAMES.JOB_POLL, {
-      periodInMinutes: interval,
-    });
-
-    Logger.info(`Polling started (interval: ${interval} minute${interval > 1 ? 's' : ''})`);
+    await chrome.storage.local.set({ [STORAGE_KEYS.IS_RUNNING]: true });
+    Logger.info(`Polling active (interval: ${interval} minute${interval > 1 ? 's' : ''})`);
 
     // Update badge to green indicator
     await chrome.action.setBadgeBackgroundColor({ color: '#00e59b' });
@@ -164,19 +178,32 @@ async function startPolling(): Promise<void> {
     await pollForJob();
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    Logger.error('Failed to start polling: API health check failed', {
+    Logger.error('Failed to ensure polling', {
       error: message,
       errorType: error?.constructor?.name,
       errorStack: error instanceof Error ? error.stack : undefined
     });
 
-    // Stop polling and update state
-    await chrome.storage.local.set({ [STORAGE_KEYS.IS_RUNNING]: false });
-    await chrome.action.setBadgeBackgroundColor({ color: '#808080' });
-    await chrome.action.setBadgeText({ text: ' ' });
-
+    // Do not flip the persisted run state on transient startup/network errors.
+    // The alarm remains the retry path.
     throw error;
   }
+}
+
+/**
+ * Restore polling when Chrome reloads the unpacked extension or recreates its
+ * Manifest V3 service worker. The persisted isRunning flag alone is not enough:
+ * the polling alarm may be absent after an extension reload.
+ */
+async function resumePollingIfEnabled(): Promise<void> {
+  const result = await chrome.storage.local.get(STORAGE_KEYS.IS_RUNNING);
+  if (result[STORAGE_KEYS.IS_RUNNING]) {
+    await startPolling();
+    return;
+  }
+
+  await chrome.action.setBadgeBackgroundColor({ color: '#808080' });
+  await chrome.action.setBadgeText({ text: ' ' });
 }
 
 /**
@@ -195,6 +222,19 @@ async function stopPolling(): Promise<void> {
  * Poll for next job
  */
 async function pollForJob(): Promise<void> {
+  if (jobPollPromise) {
+    return jobPollPromise;
+  }
+
+  jobPollPromise = pollForJobInternal();
+  try {
+    await jobPollPromise;
+  } finally {
+    jobPollPromise = null;
+  }
+}
+
+async function pollForJobInternal(): Promise<void> {
   try {
     // Check if polling is enabled
     const runningResult = await chrome.storage.local.get(STORAGE_KEYS.IS_RUNNING);
@@ -587,6 +627,15 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'ENSURE_POLLING') {
+    chrome.storage.local
+      .set({ [STORAGE_KEYS.IS_RUNNING]: true })
+      .then(() => startPolling())
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
   if (message.action === 'STOP_POLLING') {
     chrome.storage.local
       .set({ [STORAGE_KEYS.IS_RUNNING]: false })
@@ -611,16 +660,11 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
   return false;
 });
 
-// Initialize badge on startup
-chrome.storage.local.get(STORAGE_KEYS.IS_RUNNING).then((result) => {
-  const isRunning = result[STORAGE_KEYS.IS_RUNNING] || false;
-  if (isRunning) {
-    chrome.action.setBadgeBackgroundColor({ color: '#00e59b' });
-    chrome.action.setBadgeText({ text: ' ' });
-  } else {
-    chrome.action.setBadgeBackgroundColor({ color: '#808080' });
-    chrome.action.setBadgeText({ text: ' ' });
-  }
+// Reconcile the persisted state with the actual alarm every time the service
+// worker is created, including unpacked-extension reloads.
+void resumePollingIfEnabled().catch((error) => {
+  const message = error instanceof Error ? error.message : 'Unknown error';
+  Logger.error('Failed to restore polling state', { error: message });
 });
 
 Logger.info('Background service worker initialized');

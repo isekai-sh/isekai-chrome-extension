@@ -822,7 +822,22 @@ cancelSettingsBtn.addEventListener('click', closeSettings);
 saveSettingsBtn.addEventListener('click', saveSettings);
 
 // Initial load
+async function wakeBackgroundServiceWorker(): Promise<void> {
+  try {
+    // This is a dedicated automation browser. Opening the console must repair
+    // polling even after a transient Core outage or a lost Manifest V3 alarm.
+    const response = await chrome.runtime.sendMessage({ action: 'ENSURE_POLLING' });
+    if (!response?.success) {
+      throw new Error(response?.error || 'Polling could not be ensured');
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    await Logger.warning('Failed to wake background service worker', { error: message });
+  }
+}
+
 async function initialize() {
+  await wakeBackgroundServiceWorker();
   await loadFilterPreferences();
   loadLogs();
   loadStats();
